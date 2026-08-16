@@ -1,21 +1,18 @@
--- Modernized Reanimation Core
--- Compatible with updated Luau engine / Server-authoritative character loading
+-- Modernized Alive Reanimation (Mobile & PC Compatible)
+-- Stable Network Ownership & No-Drop Accessory Attachment
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
-local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 local Config = _G.Config or {
-    RigTransparency = 1,
-    R15 = false,
-    BreakJointsDelay = 0.1,
+    RigTransparency = 0,    -- 0 = fully visible rig, 1 = invisible rig
+    HideRealCharacter = true, -- Makes your real body transparent
     SetCameraSubject = true,
-    DisableCharacterCollisions = true,
-    SimulationRadius = 2147483647
+    R15 = false,
 }
 
 local System = {
@@ -23,8 +20,8 @@ local System = {
     Rig = nil,
     RigHumanoid = nil,
     RigRoot = nil,
-    Aligns = {},
-    Connections = {}
+    Connections = {},
+    Aligns = {}
 }
 
 local function CleanConnections()
@@ -46,112 +43,114 @@ local function CreateRig(r15)
     rig.Parent = Workspace
 
     for _, desc in ipairs(rig:GetDescendants()) do
-        if desc:IsA("BasePart") or desc:IsA("Decal") then
-            desc.Transparency = Config.RigTransparency or 1
-            if desc:IsA("BasePart") then
-                desc.CanCollide = false
-            end
+        if desc:IsA("BasePart") then
+            desc.CanCollide = false
+            desc.Transparency = Config.RigTransparency or 0
+        elseif desc:IsA("Decal") then
+            desc.Transparency = Config.RigTransparency or 0
         end
     end
 
     return rig
 end
 
-local function AlignPart(part0, part1, offset)
-    if not part0 or not part1 then return end
-    table.insert(System.Aligns, {
-        Part0 = part0,
-        Part1 = part1,
-        Offset = offset or CFrame.identity
-    })
-end
-
-local function OnCharacterAdded(character)
+local function SetupCharacter(character)
     table.clear(System.Aligns)
 
     local humanoid = character:WaitForChild("Humanoid", 5)
     local rootPart = character:WaitForChild("HumanoidRootPart", 5)
-
     if not humanoid or not rootPart or not System.Rig then return end
 
-    -- Position rig to the new character spawn
-    System.RigRoot.CFrame = rootPart.CFrame
-
-    if Config.SetCameraSubject and System.RigHumanoid then
-        Camera.CameraSubject = System.RigHumanoid
+    -- Hide real character parts so only the Rig is seen
+    if Config.HideRealCharacter then
+        for _, part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.Transparency = 1
+            elseif part:IsA("Decal") then
+                part.Transparency = 1
+            end
+        end
     end
 
-    -- Process accessories alignment
+    -- Setup accessory alignments
     for _, child in ipairs(character:GetChildren()) do
         if child:IsA("Accessory") then
             local handle = child:FindFirstChild("Handle")
             if handle and handle:IsA("BasePart") then
-                local targetAttachment = child:FindFirstChildWhichIsA("Attachment", true)
-                local rigAttachment = targetAttachment and System.Rig:FindFirstChild(targetAttachment.Name, true)
+                handle.CanCollide = false
                 
-                if rigAttachment and rigAttachment.Parent:IsA("BasePart") then
-                    AlignPart(handle, rigAttachment.Parent, targetAttachment.CFrame:Inverse() * rigAttachment.CFrame)
+                local att = child:FindFirstChildWhichIsA("Attachment", true)
+                local rigAtt = att and System.Rig:FindFirstChild(att.Name, true)
+                
+                if rigAtt and rigAtt.Parent:IsA("BasePart") then
+                    table.insert(System.Aligns, {
+                        Handle = handle,
+                        Target = rigAtt.Parent,
+                        Offset = att.CFrame:Inverse() * rigAtt.CFrame
+                    })
                 else
-                    AlignPart(handle, System.RigRoot, CFrame.identity)
+                    table.insert(System.Aligns, {
+                        Handle = handle,
+                        Target = System.RigRoot,
+                        Offset = CFrame.identity
+                    })
                 end
             end
         end
     end
 
-    -- Break client joints after delay to allow network physics ownership
-    task.delay(Config.BreakJointsDelay or 0.1, function()
-        if character and character:IsDescendantOf(Workspace) then
-            humanoid:ChangeState(Enum.HumanoidStateType.Dead)
-            character:BreakJoints()
-        end
-    end)
+    if Config.SetCameraSubject and System.RigHumanoid then
+        Camera.CameraSubject = System.RigHumanoid
+    end
 end
 
 function System:Start()
     if self.Running then return end
     self.Running = true
 
-    -- Create target control rig
     self.Rig = CreateRig(Config.R15)
     self.RigHumanoid = self.Rig:FindFirstChildOfClass("Humanoid")
     self.RigRoot = self.Rig:FindFirstChild("HumanoidRootPart")
 
-    -- Physics step loop for alignment & velocity preservation
-    local stepConn = RunService.PostSimulation:Connect(function()
-        local antiSleep = Vector3.new(0, math.sin(os.clock() * 15) * 0.001, 0)
+    -- Step loop: Sync Rig CFrame to Real Character & Sync Accessories
+    local stepConn = RunService.PreRender:Connect(function()
+        local character = LocalPlayer.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
 
-        for _, align in ipairs(self.Aligns) do
-            local p0, p1 = align.Part0, align.Part1
-            if p0 and p1 and p0:IsDescendantOf(Workspace) and p1:IsDescendantOf(Workspace) then
-                p0.AssemblyAngularVelocity = Vector3.zero
-                p0.AssemblyLinearVelocity = Vector3.new(0, 27, 0)
-                p0.CFrame = (p1.CFrame * align.Offset) + antiSleep
+        if root and self.RigRoot then
+            self.RigRoot.CFrame = root.CFrame
+
+            -- Move limbs matching the real character
+            for _, limb in ipairs(character:GetChildren()) do
+                if limb:IsA("BasePart") and limb.Name ~= "HumanoidRootPart" then
+                    local rigLimb = self.Rig:FindFirstChild(limb.Name)
+                    if rigLimb then
+                        rigLimb.CFrame = limb.CFrame
+                    end
+                end
             end
         end
 
-        -- Mirror movement to dummy rig
-        local currentCharacter = LocalPlayer.Character
-        local currentHumanoid = currentCharacter and currentCharacter:FindFirstChildOfClass("Humanoid")
-        if currentHumanoid and self.RigHumanoid then
-            self.RigHumanoid:Move(currentHumanoid.MoveDirection)
-            self.RigHumanoid.Jump = currentHumanoid.Jump
+        -- Keep hats locked without dropping
+        for _, data in ipairs(self.Aligns) do
+            if data.Handle and data.Target and data.Handle.Parent then
+                data.Handle.CFrame = data.Target.CFrame * data.Offset
+            end
         end
     end)
     table.insert(self.Connections, stepConn)
 
-    -- Auto-hook on respawn
-    local charConn = LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
+    local charConn = LocalPlayer.CharacterAdded:Connect(SetupCharacter)
     table.insert(self.Connections, charConn)
 
     if LocalPlayer.Character then
-        task.spawn(OnCharacterAdded, LocalPlayer.Character)
+        task.spawn(SetupCharacter, LocalPlayer.Character)
     end
 end
 
 function System:Stop()
     if not self.Running then return end
     self.Running = false
-
     CleanConnections()
     table.clear(self.Aligns)
 
@@ -161,14 +160,14 @@ function System:Stop()
     end
 
     if LocalPlayer.Character then
-        local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if hum then
-            Camera.CameraSubject = hum
+        for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+            if part:IsA("BasePart") or part:IsA("Decal") then
+                part.Transparency = 0
+            end
         end
     end
 end
 
--- Initialize
 System:Start()
 
 return System
